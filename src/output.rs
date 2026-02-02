@@ -31,11 +31,19 @@ impl Output {
     }
 
     pub fn error<D: fmt::Display>(&self, msg: D) {
-        eprintln!("{} {msg}", "error:".bold().red());
+        if self.no_color {
+            eprintln!("error: {msg}");
+        } else {
+            eprintln!("{} {msg}", "error:".bold().red());
+        }
     }
 
     pub fn warn<D: fmt::Display>(&self, msg: D) {
-        eprintln!("{}: {msg}", "warning:".bold().yellow());
+        if self.no_color {
+            eprintln!("warning: {msg}");
+        } else {
+            eprintln!("{} {msg}", "warning:".bold().yellow());
+        }
     }
 
     pub fn print_header<D: fmt::Display>(&self, msg: D) {

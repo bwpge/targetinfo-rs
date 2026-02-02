@@ -30,6 +30,10 @@ struct Cli {
     /// Disable color output (color is always disabled with -g)
     #[arg(long)]
     no_color: bool,
+
+    /// When scanning multiple targets, prevent exiting if an error is encountered
+    #[arg(short = 'C', long)]
+    continue_on_error: bool,
 }
 
 #[tokio::main]
@@ -48,8 +52,10 @@ async fn main() -> ExitCode {
         match run(target, &cli, &output).await {
             Ok(_) => (),
             Err(e) => {
-                output.error(format!("{target}: {e}"));
-                return ExitCode::FAILURE;
+                output.error(e);
+                if !cli.continue_on_error {
+                    return ExitCode::FAILURE;
+                }
             }
         };
     }
@@ -59,10 +65,38 @@ async fn main() -> ExitCode {
 
 async fn run(target: &str, cli: &Cli, output: &Output) -> SMBResult<()> {
     output.print_header(target);
+    let timeout = cli.timeout.unwrap_or(3.0);
 
+    let mut try_smb2_only = false;
+    match do_connect(target, timeout, false).await {
+        Ok(_) => (),
+        Err(e) => {
+            match e {
+                // we get an invalid message error when servers don't negotiate correctly. this can
+                // happen on older servers that don't negotiate multi-protocol
+                smb::Error::InvalidMessage(_) => try_smb2_only = true,
+                _ => return Err(e),
+            };
+        }
+    };
+
+    if try_smb2_only {
+        do_connect(target, timeout, true).await?;
+    }
+
+    let pairs = GLOBAL_AV_PAIRS.lock().unwrap();
+    output.print(Record::new(target, pairs.clone()));
+
+    Ok(())
+}
+
+async fn do_connect(target: &str, timeout: f32, smb2_only: bool) -> SMBResult<()> {
     let mut conf = ClientConfig::default();
-    conf.connection.timeout = Some(Duration::from_secs_f32(cli.timeout.unwrap_or(3.0)));
-    let client = Client::new(conf);
+    conf.connection.timeout = Some(Duration::from_secs_f32(timeout));
+    if smb2_only {
+        conf.connection.smb2_only_negotiate = true;
+    }
+    let client = Client::new(conf.clone());
 
     // credentials are never actually used
     let user = "asdf";
@@ -71,20 +105,14 @@ async fn run(target: &str, cli: &Cli, output: &Output) -> SMBResult<()> {
     // this is always going to be an error because of the sspi patch, so just sanity check
     // something else didn't go wrong. this is obviously not perfect if sspi runs into a different
     // error while getting the NTLM challenge
-    let res = client.ipc_connect(target, user, password).await;
-    match res {
-        Ok(_) => todo!(),
-        Err(e) => {
-            match e {
-                smb::Error::SspiError(_) => (),
-                _ => return Err(e),
-            };
-        }
+    let res = match client.ipc_connect(target, user, password).await {
+        Ok(_) => Ok(()),
+        Err(e) => match e {
+            smb::Error::SspiError(_) => Ok(()),
+            _ => Err(e),
+        },
     };
 
-    let pairs = GLOBAL_AV_PAIRS.lock().unwrap();
-    output.print(Record::new(target, pairs.clone()));
-
     let _ = client.close().await;
-    Ok(())
+    res
 }
